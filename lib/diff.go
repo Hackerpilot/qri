@@ -38,10 +38,10 @@ type DiffParams struct {
 
 // DiffResponse is the result of a call to diff
 type DiffResponse struct {
-	Stat *DiffStat   `json:"stat,omitempty"`
-	Diff []*Delta    `json:"diff,omitempty"`
-	A    interface{} `json:"b,omitempty"`
-	B    interface{} `json:"a,omitempty"`
+	Stat       *DiffStat `json:"stat,omitempty"`
+	SchemaStat *DiffStat `json:"schemaStat,omitempty"`
+	Schema     []*Delta  `json:"schema,omitempty"`
+	Diff       []*Delta  `json:"diff,omitempty"`
 }
 
 // Diff computes the diff of two datasets
@@ -77,10 +77,13 @@ func (r *DatasetRequests) Diff(p *DiffParams, res *DiffResponse) (err error) {
 			return err
 		}
 
-		res.Stat = &deepdiff.Stats{}
-		res.A = leftData
-		res.B = rightData
-		res.Diff, err = deepdiff.Diff(leftData, rightData, deepdiff.OptionSetStats(res.Stat))
+		res.Schema, res.SchemaStat, err = schemaDiff(ctx, leftComp, rightComp)
+		if err != nil {
+			return err
+		}
+
+		dd := deepdiff.NewDeepDiff()
+		res.Diff, res.Stat, err = dd.StatDiff(ctx, leftData, rightData)
 		return err
 	} else if !repo.IsRefString(p.LeftPath) || !repo.IsRefString(p.RightPath) {
 		// Only one is a file path, other is a reference. Cannot compare.
@@ -224,9 +227,44 @@ func (r *DatasetRequests) Diff(p *DiffParams, res *DiffResponse) (err error) {
 		return err
 	}
 
-	res.Stat = &deepdiff.Stats{}
-	res.A = leftData
-	res.B = rightData
-	res.Diff, err = deepdiff.Diff(leftData, rightData, deepdiff.OptionSetStats(res.Stat))
+	dd := deepdiff.NewDeepDiff()
+	res.Diff, res.Stat, err = dd.StatDiff(ctx, leftData, rightData)
 	return err
+}
+
+func schemaDiff(ctx context.Context, left, right *component.BodyComponent) ([]*Delta, *DiffStat, error) {
+	dd := deepdiff.NewDeepDiff()
+	if left.Format == ".csv" && right.Format == ".csv" {
+		left, err := terribleHackToGetHeaderRow(left.InferredSchema)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		right, err := terribleHackToGetHeaderRow(right.InferredSchema)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return dd.StatDiff(ctx, left, right)
+	}
+	return dd.StatDiff(ctx, left.InferredSchema, right.InferredSchema)
+}
+
+// TODO - holy shit dis so bad. fix
+func terribleHackToGetHeaderRow(sch map[string]interface{}) ([]string, error) {
+	if itemObj, ok := sch["items"].(map[string]interface{}); ok {
+		if itemArr, ok := itemObj["items"].([]interface{}); ok {
+			titles := make([]string, len(itemArr))
+			for i, f := range itemArr {
+				if field, ok := f.(map[string]interface{}); ok {
+					if title, ok := field["title"].(string); ok {
+						titles[i] = title
+					}
+				}
+			}
+			return titles, nil
+		}
+	}
+	log.Debug("that terrible hack to detect header row & types just failed")
+	return nil, fmt.Errorf("nope")
 }
